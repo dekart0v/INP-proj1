@@ -58,39 +58,19 @@ architecture behavioral of cpu is -- main
  signal ptr_dec  : std_logic;
  signal ptr_out  : std_logic_vector(9  downto 0); -- 10 byte RAM
 
- --signal cnt_inc  : std_logic;
- --signal cnt_dec  : std_logic;
- --signal cnt_out  : std_logic_vector(7  downto 0); -- ограничено 8 битами 
-
  type fsm_state is (init, fetch, decode, fsm_ptr_inc, fsm_ptr_dec, fsm_value_inc_read, fsm_value_inc_write, 
-                    fsm_value_dec_read, fsm_value_dec_write, putchar, rtrn); -- fetch decode + ostalnyje FSM_STATE
- signal state   : fsm_state; -- RESET = 1 (to init the logics)
- signal state_2 : fsm_state; -- main
-
- --type instructions is (ptr_inc, ptr_dec, value_inc, value_dec, while_start, while_end, printf, getchar, break, rtrn); -- возможные значения переменной
- --signal instruction : instructions; -- переменная
-
- --signal filter : std_logic_vector(1 downto 0); --for mux "11" "00" "10" "01"
+                    fsm_value_dec_read, fsm_value_dec_write, putchar, rtrn, skip); -- states of CPU
+ signal state   : fsm_state; -- after RESET = 1 (to init the logics)
+ signal state_2 : fsm_state; -- so CPU knows which state is coming next
 
 begin
- -- zde dopiste vlastni VHDL kod
 
- -- pri tvorbe kodu reflektujte rady ze cviceni INP, zejmena mejte na pameti, ze
- --   - nelze z vice procesu ovladat stejny signal,
- --   - je vhodne mit jeden proces pro popis jedne hardwarove komponenty, protoze pak
- --      - u synchronnich komponent obsahuje sensitivity list pouze CLK a RESET a
- --      - u kombinacnich komponent obsahuje sensitivity list vsechny ctene signaly.
-
-    --DATA_ADDR <= ptr_out;
-    --CODE_ADDR <= pc_out; -- инструкция X"00" например
-
-
-    PC: process(CLK, RESET, pc_inc, pc_dec) -- Program Counter (тут хранится id инструкции следующей)
+    PC: process(CLK, RESET, pc_inc, pc_dec) -- Program Counter
     begin
-      if (RESET = '1') then pc_out <= (others=>'0'); -- 0 потому что нужно вернуться в изначальное состояние
-      elsif (CLK'event)and(CLK='1') then
-        if (pc_inc = '1') then pc_out <= pc_out + 1;   -- PC_INC
-        elsif (pc_dec = '1') then pc_out <= pc_out - 1; -- PC_DEC
+      if (RESET = '1') then pc_out <= (others=>'0');       -- PC_OUT = 0 after RESET
+      elsif (CLK'event)and(CLK='1') then                   -- rising edge
+        if (pc_inc = '1') then pc_out <= pc_out + 1;       -- PC_INC
+        elsif (pc_dec = '1') then pc_out <= pc_out - 1;    -- PC_DEC
         end if;
       end if;
     end process;
@@ -98,112 +78,106 @@ begin
 
     PTR: process(CLK, RESET, ptr_inc, ptr_dec) -- Pointer to RAM
     begin
-      if (RESET = '1') then ptr_out <= (others=>'0'); -- 0 потому что нужно вернуться в изначальное состояние
-      elsif (CLK'event)and(CLK='1') then
-        if (ptr_inc = '1') then ptr_out <= ptr_out + 1;
-        elsif (ptr_dec = '1') then ptr_out <= ptr_out - 1;
+      if (RESET = '1') then ptr_out <= (others=>'0');      -- PTR_OUT = 0 after RESET
+      elsif (CLK'event)and(CLK='1') then                   -- rising edge
+        if (ptr_inc = '1') then ptr_out <= ptr_out + 1;    -- PTR_INC
+        elsif (ptr_dec = '1') then ptr_out <= ptr_out - 1; -- PTR_DEC
         end if;
       end if;
     end process;
   
   
-    --CNT: process(CLK, RESET, cnt_inc, cnt_dec) -- 8bit restriction
-    --begin
-    --  if (RESET = '1') then cnt_out <= (others=>'0'); -- 0 потому что нужно вернуться в изначальное состояние
-    --  elsif (CLK'event)and(CLK='1') then
-    --    if (cnt_inc = '1') then cnt_out <= cnt_out + 1;
-    --    elsif (cnt_dec = '1') then cnt_out <= cnt_out - 1;
-    --    end if;
-    --  end if;
-    --end process;
-
-
-    FSM_logic_start : process(CLK, RESET, EN, state_2)
+    FSM_logic_start : process(CLK, RESET, EN, state_2) -- present state logic
     begin
-      if (RESET = '1') then state <= init;
-      elsif (EN = '1' and CLK'event and CLK = '1') then state <= state_2;
+      if (RESET = '1') then state <= init;                                -- present state after reset
+      elsif (EN = '1' and CLK'event and CLK = '1') then state <= state_2; -- next state after present state + rising edge
       end if;
     end process;
     
     
-    FSM_logic : process(CLK, state, ptr_out, pc_out, OUT_BUSY, DATA_RDATA)
+    FSM_logic : process(CLK, state, ptr_out, pc_out, OUT_BUSY, DATA_RDATA) -- next state logic
     begin
-      pc_inc <= '0';
-      pc_dec <= '0';
-      ptr_inc <= '0';
-      ptr_dec <= '0';
-      DATA_EN <= '0';
-      OUT_WREN <= '0';      
+      pc_inc <= '0';   --|>
+      pc_dec <= '0';   --|> {declaring initial values
+      ptr_inc <= '0';  --|> after present state (RESET = 1)}
+      ptr_dec <= '0';  --|>
+      DATA_EN <= '0';  -- RAM OFF
+      OUT_WREN <= '0'; -- without this declared prints the last char endlessly
 
-      -- тут прописать case state is when fetch; when decode; when >; when <; when +; when -; when .
-      case state is
-        when fetch => -- чтение из память[PC]
-          CODE_ADDR <= pc_out;
-          CODE_EN <= '1'; -- включаем rom
-          state_2 <= decode;
+      case state is -- the logic itself
+
+        when fetch => -- ROM[pc_out]: contains instruction
+          CODE_ADDR <= pc_out;            -- CODE_DATA now has the instruction
+          CODE_EN <= '1';                 -- ROM ON
+          state_2 <= decode;              -- defining the next state
         
-        when decode => -- понять какая инструкция прочиталась 
+        when decode => -- convert instruction into fsm_state function
           case CODE_DATA is 
-            when X"3E" => state_2 <= fsm_ptr_inc;
-            when X"3C" => state_2 <= fsm_ptr_dec;
-            when X"2B" => state_2 <= fsm_value_inc_read;
-            when X"2D" => state_2 <= fsm_value_dec_read;
-            when X"2E" => state_2 <= putchar;
-            when X"00" => state_2 <= rtrn;
-            when others => state_2 <= rtrn; --TODO
+            when X"3E"  => state_2 <= fsm_ptr_inc;        -- >
+            when X"3C"  => state_2 <= fsm_ptr_dec;        -- <
+            when X"2B"  => state_2 <= fsm_value_inc_read; -- +
+            when X"2D"  => state_2 <= fsm_value_dec_read; -- -
+            when X"2E"  => state_2 <= putchar;            -- .
+            when X"00"  => state_2 <= rtrn;               -- NULL
+            when others => state_2 <= skip;               -- non-brainfuck instructions
           end case;
         
-        when fsm_ptr_inc => 
-          state_2 <= fetch;
-          ptr_inc <= '1';
-          pc_inc <= '1';
+        when fsm_ptr_inc => -- {>}
+          state_2 <= fetch;               -- defining the next state
+          ptr_inc <= '1';                 -- >
+          pc_inc <= '1';                  -- changing to next Brainfuck instruction
 
-        when fsm_ptr_dec =>
-          state_2 <= fetch;
-          ptr_dec <= '1';
-          pc_inc <= '1';
+        when fsm_ptr_dec => -- {<}
+          state_2 <= fetch;               -- defining the next state
+          ptr_dec <= '1';                 -- <
+          pc_inc <= '1';                  -- changing to next Brainfuck instruction
 
-        when fsm_value_inc_read =>
-          state_2 <= fsm_value_inc_write;
-          DATA_ADDR <= ptr_out;
-          DATA_EN <= '1';
-          DATA_WREN <= '0'; 
+        when fsm_value_inc_read => -- 1st part (reading) of {+}
+          state_2 <= fsm_value_inc_write; -- defining the next state (second part of the function; we cant read and write in a single one)
+          DATA_ADDR <= ptr_out;           -- getting the address from ptr_out and writing it to the DATA_ADDR
+          DATA_EN <= '1';                 -- RAM ON
+          DATA_WREN <= '0';               -- RAM read
 
-        when fsm_value_inc_write =>
-          state_2 <= fetch;
-          pc_inc <= '1';
-          DATA_EN <= '1';
-          DATA_WREN <= '1';
-          DATA_WDATA <= DATA_RDATA + 1;
+        when fsm_value_inc_write => -- 2nd part (writing) of {+}
+          state_2 <= fetch;               -- defining the next state
+          pc_inc <= '1';                  -- changing to next Brainfuck instruction
+          DATA_EN <= '1';                 -- to be able to generate output; RAM ON
+          DATA_WREN <= '1';               -- to be able to generate output; RAM write
+          DATA_WDATA <= DATA_RDATA + 1;   -- the output itself + 1
 
-        when fsm_value_dec_read =>
-          state_2 <= fsm_value_dec_write;
-          DATA_ADDR <= ptr_out;
-          DATA_EN <= '1';
-          DATA_WREN <= '0'; 
+        when fsm_value_dec_read => -- 1st part (reading) of {-}
+          state_2 <= fsm_value_dec_write; -- defining the next state (second part of the function; we cant read and write in a single one)
+          DATA_ADDR <= ptr_out;           -- getting the address from ptr_out and writing it to the DATA_ADDR
+          DATA_EN <= '1';                 -- RAM ON
+          DATA_WREN <= '0';               -- RAM read
 
-        when fsm_value_dec_write =>
-          state_2 <= fetch;
-          pc_inc <= '1';
-          DATA_EN <= '1';
-          DATA_WREN <= '1';
-          DATA_WDATA <= DATA_RDATA - 1;
+        when fsm_value_dec_write => -- 2nd part (writing) of {-}
+          state_2 <= fetch;               -- defining the next state
+          pc_inc <= '1';                  -- changing to next Brainfuck instruction
+          DATA_EN <= '1';                 -- to be able to generate output; RAM ON
+          DATA_WREN <= '1';               -- to be able to generate output; RAM write
+          DATA_WDATA <= DATA_RDATA - 1;   -- the output itself - 1
 
-        when putchar =>
-          if (OUT_BUSY = '1') then state_2 <= putchar;
+        when putchar => -- {.} print char on the display
+          if (OUT_BUSY = '1') then state_2 <= putchar; -- if output has smth already, we repeat the state
           else 
-            state_2 <= fetch;
-            pc_inc <= '1';
-            OUT_WREN <= '1';
-            OUT_DATA <= DATA_RDATA;
+            state_2 <= fetch;             -- defining the next state
+            pc_inc <= '1';                -- changing to next Brainfuck instruction
+            OUT_WREN <= '1';              -- allowing to print smth on the LCD
+            OUT_DATA <= DATA_RDATA;       -- printing out what we have in DATA_RDATA after *write() functions
           end if;
 
-        when rtrn =>
-          state_2 <= fetch;
+        when rtrn => -- halt the CPU
+          state_2 <= rtrn;                -- defining the next state (return has return as the next state, so it will stop eventually)
 
-        when others =>
-          state_2 <= fetch;
-          pc_inc <= '0';
+        when skip => -- skipping non-brainfuck characters/insctuctions
+          state_2 <= fetch;               -- defining the next state (skip the undefined Brainfuck instruction and go fetch next instead)
+          pc_inc <= '1';                  -- changing to next Brainfuck instruction
+
+        when others => -- just catch some random stuff (no idea what exactly, since we already have skip(), but we stiil need 'others' clause to compile correctly)
+          state_2 <= fetch;               -- defining the next state (skip the undefined Brainfuck instruction and go fetch next instead)
+          pc_inc <= '0';                  -- NOT changing to next Brainfuck instruction
+
         end case;
     end process;
 
